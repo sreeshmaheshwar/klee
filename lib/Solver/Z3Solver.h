@@ -22,7 +22,10 @@ public:
 
   /// Get the query in SMT-LIBv2 format.
   /// \return A C-style string. The caller is responsible for freeing this.
-  std::string getConstraintLog(const Query &) override;
+  std::string getConstraintLog(Query &) override;
+
+  void push() override;
+  void pop() override;
 
   /// setCoreSolverTimeout - Set constraint solver timeout delay to the given
   /// value; 0
