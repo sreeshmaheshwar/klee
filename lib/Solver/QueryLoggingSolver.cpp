@@ -43,16 +43,17 @@ QueryLoggingSolver::QueryLoggingSolver(std::unique_ptr<Solver> solver,
 #ifdef HAVE_ZLIB_H
   if (!CreateCompressedQueryLog) {
 #endif
-    os = klee_open_output_file(path, error);
+    fos = klee_open_output_file(path, error);
 #ifdef HAVE_ZLIB_H
   } else {
     path.append(".gz");
-    os = klee_open_compressed_output_file(path, error);
+    fos = klee_open_compressed_output_file(path, error);
   }
 #endif
-  if (!os) {
+  if (!fos) {
     klee_error("Could not open file %s : %s", path.c_str(), error.c_str());
   }
+  os = std::make_unique<llvm::raw_string_ostream>(contents);
   assert(this->solver);
 }
 

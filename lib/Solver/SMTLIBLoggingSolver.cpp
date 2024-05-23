@@ -10,8 +10,13 @@
 #include "QueryLoggingSolver.h"
 
 #include "klee/Expr/ExprSMTLIBPrinter.h"
+#include "klee/Support/FileHandling.h"
+#include "klee/Solver/SolverCmdLine.h"
+#include "klee/Support/ErrorHandling.h"
 
 #include <memory>
+#include <sstream>
+#include <string>
 #include <utility>
 
 using namespace klee;
@@ -21,6 +26,7 @@ using namespace klee;
 class SMTLIBLoggingSolver : public QueryLoggingSolver
 {
         private:
+                std::istringstream queryStream;
                 ExprSMTLIBPrinter printer;
 
                 virtual void printQuery(const Query& query,
@@ -42,6 +48,34 @@ class SMTLIBLoggingSolver : public QueryLoggingSolver
                         }
 
                         printer.generateOutput();
+
+                        if (QueryInputFile != "") {
+                                std::istringstream contentsStream(contents);
+                                std::string receivedLine;
+                                while (std::getline(contentsStream, receivedLine)) {
+                                        if (receivedLine.empty() || receivedLine.front() == ';') {
+                                                continue;
+                                        }
+                                        std::string expectedLine;
+                                        bool found = false;
+                                        while (!found && std::getline(queryStream, expectedLine)) {
+                                                if (expectedLine.empty() || expectedLine.front() == ';') {
+                                                        continue;
+                                                }
+                                                found = true;
+                                        }
+                                        if (!found) {
+                                                klee_warning("Reached end of query input file");
+                                        } else if (receivedLine != expectedLine) {
+                                                klee_warning("Expected: %s", expectedLine.c_str());
+                                                klee_warning("Received: %s", receivedLine.c_str());
+                                                klee_error("Mismatch with query input file");
+                                        }
+                                }
+                        }
+
+                        *fos << contents; // Output query to file.
+                        contents.clear();
                 }    
 
 public:
@@ -51,6 +85,15 @@ public:
                            queryTimeToLog, logTimedOut) {
     // Setup the printer
     printer.setOutput(logBuffer);
+        if (QueryInputFile != "") {
+                std::string error;
+                auto buffer = klee_open_input_file(QueryInputFile, error);
+                if (!buffer) {
+                        klee_error("Error opening query input file: %s", error.c_str());
+                }
+                std::string content = buffer->getBuffer().str();
+                queryStream.str(content);
+        }
   }
 };
 
