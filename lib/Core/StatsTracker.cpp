@@ -450,10 +450,12 @@ void StatsTracker::writeStatsHeader() {
          << "MallocUsage INTEGER,"
          << "Queries INTEGER,"
          << "SolverQueries INTEGER,"
+         << "CommonConstraints INTEGER,"
          << "NumQueryConstructs INTEGER,"
          << "WallTime REAL,"
          << "CoveredInstructions INTEGER,"
          << "UncoveredInstructions INTEGER,"
+         << "PostLCPTime INTEGER,"
          << "QueryTime INTEGER,"
          << "SolverTime INTEGER,"
          << "CexCacheTime INTEGER,"
@@ -496,10 +498,12 @@ void StatsTracker::writeStatsHeader() {
          << "MallocUsage,"
          << "Queries,"
          << "SolverQueries,"
+         << "CommonConstraints,"
          << "NumQueryConstructs,"
          << "WallTime,"
          << "CoveredInstructions,"
          << "UncoveredInstructions,"
+         << "PostLCPTime,"
          << "QueryTime,"
          << "SolverTime,"
          << "CexCacheTime,"
@@ -522,6 +526,8 @@ void StatsTracker::writeStatsHeader() {
   #undef TCLASS
   #define TCLASS(Name, I) << "?,"
   insert << " VALUES ("
+         << "?,"
+         << "?,"
          << "?,"
          << "?,"
          << "?,"
@@ -577,10 +583,12 @@ void StatsTracker::writeStatsLine() {
   sqlite3_bind_int64(insertStmt, arg++, util::GetTotalMallocUsage() + executor.memory->getUsedDeterministicSize());
   sqlite3_bind_int64(insertStmt, arg++, stats::queries);
   sqlite3_bind_int64(insertStmt, arg++, stats::solverQueries);
+  sqlite3_bind_int64(insertStmt, arg++, stats::commonConstraints);
   sqlite3_bind_int64(insertStmt, arg++, stats::queryConstructs);
   sqlite3_bind_int64(insertStmt, arg++, elapsed().toMicroseconds());
   sqlite3_bind_int64(insertStmt, arg++, stats::coveredInstructions);
   sqlite3_bind_int64(insertStmt, arg++, stats::uncoveredInstructions);
+  sqlite3_bind_int64(insertStmt, arg++, stats::postLCPTime);
   sqlite3_bind_int64(insertStmt, arg++, stats::queryTime);
   sqlite3_bind_int64(insertStmt, arg++, stats::solverTime);
   sqlite3_bind_int64(insertStmt, arg++, stats::cexCacheTime);
@@ -651,6 +659,7 @@ void StatsTracker::writeIStats() {
   istatsMask.set(sm.getStatisticID("Queries"));
   istatsMask.set(sm.getStatisticID("QueriesValid"));
   istatsMask.set(sm.getStatisticID("QueriesInvalid"));
+  istatsMask.set(sm.getStatisticID("PostLCPTime"));
   istatsMask.set(sm.getStatisticID("QueryTime"));
   istatsMask.set(sm.getStatisticID("ResolveTime"));
   istatsMask.set(sm.getStatisticID("Instructions"));

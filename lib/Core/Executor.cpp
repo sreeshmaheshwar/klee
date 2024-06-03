@@ -1298,6 +1298,7 @@ ref<Expr> Executor::toUnique(const ExecutionState &state,
   ref<Expr> result = e;
 
   if (!isa<ConstantExpr>(e)) {
+    klee_warning("toUnique() called on non-constant expression");
     ref<ConstantExpr> value;
     bool isTrue = false;
     e = optimizer.optimizeExpr(e, true);
@@ -1320,8 +1321,10 @@ ref<klee::ConstantExpr> Executor::toConstant(ExecutionState &state, ref<Expr> e,
                                              const std::string &reason,
                                              bool concretize) {
   e = ConstraintManager::simplifyExpr(state.constraints, e);
-  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(e))
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(e)) {
+    klee_warning("Taking fast shortcut out...");
     return CE;
+  }
 
   /* If no seed evaluation results in a constant, call the solver */
   ref<ConstantExpr> cvalue = getValueFromSeeds(state, e);
@@ -4042,6 +4045,7 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
         ce->toMemory(&args[wordIndex]);
         wordIndex += (ce->getWidth() + 63) / 64;
       } else {
+        klee_warning("EXTERNAL CALL WITH SYMBOLIC ARG");
         terminateStateOnExecError(state,
                                   "external call with symbolic argument: " +
                                       callable->getName());

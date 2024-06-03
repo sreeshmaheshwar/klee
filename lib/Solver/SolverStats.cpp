@@ -13,6 +13,7 @@ using namespace klee;
 
 Statistic stats::cexCacheTime("CexCacheTime", "CCtime");
 Statistic stats::solverQueries("SolverQueries", "SQ");
+Statistic stats::commonConstraints("CommonConstraints", "CC");
 Statistic stats::queries("Queries", "Q");
 Statistic stats::queriesInvalid("QueriesInvalid", "Qiv");
 Statistic stats::queriesValid("QueriesValid", "Qv");
@@ -23,6 +24,7 @@ Statistic stats::queryCexCacheMisses("QueryCexCacheMisses", "QCexMisses");
 Statistic stats::queryConstructs("QueryConstructs", "QB");
 Statistic stats::queryCounterexamples("QueriesCEX", "Qcex");
 Statistic stats::queryTime("QueryTime", "Qtime");
+Statistic stats::postLCPTime("PostLCPTime", "PLCPtime");
 
 #ifdef KLEE_ARRAY_DEBUG
 Statistic stats::arrayHashTime("ArrayHashTime", "AHtime");
