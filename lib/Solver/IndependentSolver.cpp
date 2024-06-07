@@ -15,6 +15,7 @@
 #include "klee/Expr/Expr.h"
 #include "klee/Expr/ExprUtil.h"
 #include "klee/Support/Debug.h"
+#include "klee/Support/ErrorHandling.h"
 #include "klee/Solver/SolverImpl.h"
 
 #include "llvm/Support/raw_ostream.h"
@@ -414,7 +415,7 @@ bool IndependentSolver::computeValidity(const Query& query,
   IndependentElementSet eltsClosure =
     getIndependentConstraints(query, required);
   ConstraintSet tmp(required);
-  return solver->impl->computeValidity(Query(tmp, query.expr), 
+  return solver->impl->computeValidity(Query(tmp, query.expr, query.constraintsToWrite), 
                                        result);
 }
 
@@ -423,7 +424,7 @@ bool IndependentSolver::computeTruth(const Query& query, bool &isValid) {
   IndependentElementSet eltsClosure = 
     getIndependentConstraints(query, required);
   ConstraintSet tmp(required);
-  return solver->impl->computeTruth(Query(tmp, query.expr), 
+  return solver->impl->computeTruth(Query(tmp, query.expr, query.constraintsToWrite), 
                                     isValid);
 }
 
@@ -432,7 +433,7 @@ bool IndependentSolver::computeValue(const Query& query, ref<Expr> &result) {
   IndependentElementSet eltsClosure = 
     getIndependentConstraints(query, required);
   ConstraintSet tmp(required);
-  return solver->impl->computeValue(Query(tmp, query.expr), result);
+  return solver->impl->computeValue(Query(tmp, query.expr, query.constraintsToWrite), result);
 }
 
 // Helper function used only for assertions to make sure point created
@@ -482,6 +483,7 @@ bool IndependentSolver::computeInitialValues(const Query& query,
   // FIXME: When we switch to C++11 this should be a std::unique_ptr so we don't need
   // to remember to manually call delete
   std::list<IndependentElementSet> *factors = getAllIndependentConstraintsSets(query);
+  klee_warning("Size: %lu", factors->size());
 
   //Used to rearrange all of the answers into the correct order
   std::map<const Array*, std::vector<unsigned char> > retMap;
@@ -496,7 +498,7 @@ bool IndependentSolver::computeInitialValues(const Query& query,
     }
     ConstraintSet tmp(it->exprs);
     std::vector<std::vector<unsigned char> > tempValues;
-    if (!solver->impl->computeInitialValues(Query(tmp, ConstantExpr::alloc(0, Expr::Bool)),
+    if (!solver->impl->computeInitialValues(Query(tmp, ConstantExpr::alloc(0, Expr::Bool), query.constraintsToWrite),
                                             arraysInFactor, tempValues, hasSolution)){
       values.clear();
       delete factors;

@@ -51,7 +51,7 @@ class ConstraintManager {
 public:
   /// Create constraint manager that modifies constraints
   /// \param constraints
-  explicit ConstraintManager(ConstraintSet &constraints);
+  explicit ConstraintManager(ConstraintSet &constraints, bool unsimplified = false);
 
   /// Simplify expression expr based on constraints
   /// \param constraints set of constraints used for simplification
@@ -62,7 +62,8 @@ public:
 
   /// Add constraint to the referenced constraint set
   /// \param constraint
-  void addConstraint(const ref<Expr> &constraint);
+  /// \param simplify if true, simplify the constraint prior to adding
+  void addConstraint(const ref<Expr> &constraint, bool simplify = true);
 
 private:
   /// Rewrite set of constraints using the visitor
@@ -74,6 +75,7 @@ private:
   void addConstraintInternal(const ref<Expr> &constraint);
 
   ConstraintSet &constraints;
+  bool unsimplified;
 };
 
 } // namespace klee

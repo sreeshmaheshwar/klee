@@ -17,6 +17,8 @@ namespace stats {
 
   extern Statistic cexCacheTime;
   extern Statistic solverQueries;
+  extern Statistic commonConstraints;
+  extern Statistic symCalls;
   extern Statistic queries;
   extern Statistic queriesInvalid;
   extern Statistic queriesValid;
@@ -27,6 +29,7 @@ namespace stats {
   extern Statistic queryConstructs;
   extern Statistic queryCounterexamples;
   extern Statistic queryTime;
+  extern Statistic postLCPTime;
   
 #ifdef KLEE_ARRAY_DEBUG
   extern Statistic arrayHashTime;
