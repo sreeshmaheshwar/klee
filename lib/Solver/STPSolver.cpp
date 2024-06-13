@@ -17,6 +17,7 @@
 #include "klee/Expr/Constraints.h"
 #include "klee/Expr/ExprUtil.h"
 #include "klee/Solver/SolverImpl.h"
+#include "klee/Solver/SolverCmdLine.h"
 #include "klee/Support/ErrorHandling.h"
 #include "klee/Support/OptionCategories.h"
 
@@ -90,6 +91,11 @@ private:
   time::Span timeout;
   bool useForkedSTP;
   SolverRunStatus runStatusCode;
+  ConstraintSet assertionStack;
+
+  bool computeInitialValuesIncremental(
+      const Query &query, const std::vector<const Array *> &objects,
+      std::vector<std::vector<unsigned char>> &values, bool &hasSolution);
 
 public:
   explicit STPSolverImpl(bool useForkedSTP, bool optimizeDivides = true);
@@ -195,6 +201,7 @@ STPSolverImpl::~STPSolverImpl() {
 
 /***/
 
+// TODO: Should this be incremental?
 std::string STPSolverImpl::getConstraintLog(const Query &query) {
   vc_push(vc);
 
@@ -383,6 +390,10 @@ runAndGetCexForked(::VC vc, STPBuilder *builder, ::VCExpr q,
 bool STPSolverImpl::computeInitialValues(
     const Query &query, const std::vector<const Array *> &objects,
     std::vector<std::vector<unsigned char>> &values, bool &hasSolution) {
+  if (UseIncrementalSolver) {
+    return computeInitialValuesIncremental(query, objects, values, hasSolution);
+  }
+
   runStatusCode = SOLVER_RUN_STATUS_FAILURE;
   TimerStatIncrementer t(stats::queryTime);
 
@@ -390,6 +401,67 @@ bool STPSolverImpl::computeInitialValues(
 
   for (const auto &constraint : query.constraints)
     vc_assertFormula(vc, builder->construct(constraint));
+
+  ++stats::solverQueries;
+  ++stats::queryCounterexamples;
+  ExprHandle stp_e = builder->construct(query.expr);
+  if (DebugDumpSTPQueries) {
+    char *buf;
+    unsigned long len;
+    vc_printQueryStateToBuffer(vc, stp_e, &buf, &len, false);
+    klee_warning("STP query:\n%.*s\n", (unsigned)len, buf);
+    free(buf);
+  }
+  bool success;
+  if (useForkedSTP) {
+    runStatusCode = runAndGetCexForked(vc, builder.get(), stp_e, objects,
+                                       values, hasSolution, timeout);
+    success = ((SOLVER_RUN_STATUS_SUCCESS_SOLVABLE == runStatusCode) ||
+               (SOLVER_RUN_STATUS_SUCCESS_UNSOLVABLE == runStatusCode));
+  } else {
+    runStatusCode =
+        runAndGetCex(vc, builder.get(), stp_e, objects, values, hasSolution);
+    success = true;
+  }
+  if (success) {
+    if (hasSolution)
+      ++stats::queriesInvalid;
+    else
+      ++stats::queriesValid;
+  }
+
+  vc_pop(vc);
+
+  return success;
+}
+
+bool STPSolverImpl::computeInitialValuesIncremental(
+    const Query &query, const std::vector<const Array *> &objects,
+    std::vector<std::vector<unsigned char>> &values, bool &hasSolution) {
+  runStatusCode = SOLVER_RUN_STATUS_FAILURE;
+  TimerStatIncrementer t(stats::queryTime);
+
+  // TODO: Reduce duplication with Z3SolverImpl::internalRunSolver.
+  auto stack_it = assertionStack.begin();
+  auto query_it = query.constraints.begin();
+  // LCP between the assertion stack and the query constraints.
+  while (stack_it != assertionStack.end() && query_it != query.constraints.end() && !(*stack_it)->compare(*(*query_it))) {
+    ++stack_it;
+    ++query_it;
+  }
+  // Pop off extra constraints from stack.
+  size_t pops = std::distance(stack_it, assertionStack.end());
+  for (size_t i = 0; i < pops; ++i) {
+    vc_pop(vc);
+    assertionStack.pop_back();
+  }
+  // Add the remaining query constraints.
+  while (query_it != query.constraints.end()) {
+    vc_push(vc);
+    assertionStack.push_back(*query_it);
+    vc_assertFormula(vc, builder->construct(*query_it));
+    ++query_it;
+  }
 
   ++stats::solverQueries;
   ++stats::queryCounterexamples;
@@ -422,8 +494,6 @@ bool STPSolverImpl::computeInitialValues(
     else
       ++stats::queriesValid;
   }
-
-  vc_pop(vc);
 
   return success;
 }
