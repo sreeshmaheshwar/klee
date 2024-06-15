@@ -419,6 +419,21 @@ cl::opt<std::string> TimerInterval(
     cl::init("1s"),
     cl::cat(TerminationCat));
 
+/*** Termination Replaying Options ***/
+
+cl::opt<std::string> TermReplayInputFile(
+    "tr-input",
+    cl::desc("File to read state termiantion replay from. Disable with \"\""
+             "(default=\"\")"),
+    cl::init(""),
+    cl::cat(SearchCat));
+
+cl::opt<std::string> TermReplayOutputFile(
+    "tr-output",
+    cl::desc("File to write state termiantion replay to. Disable with \"\""
+             "(default=\"\")"),
+    cl::init(""),
+    cl::cat(SearchCat));
 
 /*** Debugging options ***/
 
@@ -513,6 +528,24 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
   memory = std::make_unique<MemoryManager>(&arrayCache);
 
   initializeSearchOptions();
+
+  if (!TermReplayInputFile.empty()) {
+    std::string error;
+    auto buffer = klee_open_input_file(TermReplayInputFile, error);
+    if (!buffer) {
+      klee_error("Could not open file for inputting search %s : %s", TermReplayInputFile.c_str(), error.c_str());
+    }
+    stis = std::make_unique<std::istringstream>(buffer->getBuffer().str());
+    advanceTerminationReplay();
+  }
+
+  if (!TermReplayOutputFile.empty()) {
+    std::string error;
+    stos = klee_open_output_file(TermReplayOutputFile, error);
+    if (!stos) {
+      klee_error("Could not open file for outputting searcher %s : %s", TermReplayOutputFile.c_str(), error.c_str());
+    }
+  }
 
   if (OnlyOutputStatesCoveringNew && !StatsTracker::useIStats())
     klee_error("To use --only-output-states-covering-new, you need to enable --output-istats.");
@@ -1291,6 +1324,11 @@ void Executor::bindLocal(KInstruction *target, ExecutionState &state,
 void Executor::bindArgument(KFunction *kf, unsigned index, 
                             ExecutionState &state, ref<Expr> value) {
   getArgumentCell(state, kf, index).value = value;
+}
+
+void Executor::advanceTerminationReplay() {
+  assert(stis && "State termination input stream should be present to be advanced.");
+  nextTerminationPresent = static_cast<bool>(*stis >> nextInstructionsToTerminate >> nextNumberToTerminate);
 }
 
 ref<Expr> Executor::toUnique(const ExecutionState &state, 
@@ -3548,6 +3586,52 @@ void Executor::bindModuleConstants() {
   }
 }
 
+void Executor::killStatesDueToCap(unsigned long toKill) {
+  if (stos) {
+    *stos << stats::instructions << " " << toKill << "\n";
+    // Statistic *S = theStatisticManager->getStatisticByName("Instructions");
+    // uint64_t instructions = S ? S->getValue() : 0;
+    // klee_warning("term-bug at: %lu", instructions);
+  }
+
+  // randomly select states for early termination
+  std::vector<ExecutionState *> arr(states.begin(), states.end()); // FIXME: expensive
+  // klee_warning("term-bug n: %d", arr.size());
+
+  if (stis) {
+    int termIndex;
+    while ((*stis >> termIndex) && termIndex != -1) {
+      if (stos) {
+        *stos << termIndex << " ";
+      }
+      // klee_warning("term-bug state: %d", arr[termIndex]->id);
+      terminateStateEarly(*arr[termIndex], "Memory limit exceeded.", StateTerminationType::OutOfMemory);
+    }
+  } else {
+    std::vector<int> stateIndex(arr.size());
+    std::iota(stateIndex.begin(), stateIndex.end(), 0);
+    for (unsigned i = 0, N = arr.size(); N && i < toKill; ++i, --N) {
+      unsigned idx = theRNG.getInt32() % N;
+      // Make two pulls to try and not hit a state that
+      // covered new code.
+      if (arr[idx]->coveredNew)
+        idx = theRNG.getInt32() % N;
+
+      std::swap(arr[idx], arr[N - 1]);
+      std::swap(stateIndex[idx], stateIndex[N - 1]);
+      // klee_warning("term-bug state: %d", arr[N - 1]->id);
+      terminateStateEarly(*arr[N - 1], "Memory limit exceeded.", StateTerminationType::OutOfMemory);
+      if (stos) {
+        *stos << stateIndex[N - 1] << " ";
+      }
+    }
+  }
+  if (stos) {
+    *stos << -1 << " "; // Signify end of state printing.
+    stos->flush();
+  }
+}
+
 bool Executor::checkMemoryUsage() {
   if (!MaxMemory) return true;
 
@@ -3556,6 +3640,19 @@ bool Executor::checkMemoryUsage() {
   // to pummel the freelist once we hit the memory cap.
   if ((stats::instructions & 0xFFFFU) != 0) // every 65536 instructions
     return true;
+
+  if (stis) {
+    if (nextTerminationPresent && stats::instructions == nextInstructionsToTerminate) {
+      klee_warning("killing %lu states in replay mode", nextNumberToTerminate);
+      killStatesDueToCap(nextNumberToTerminate);
+      advanceTerminationReplay();
+      return false;
+    }
+    // NOTE: Otherwise, we do not enforce Max Memory. This is because
+    // we are confident in our implementations - if merged, we should
+    // probably keep the Max Memory check to be safe and generalisable.
+    return true;
+  }
 
   // check memory limit
   const auto mallocUsage = util::GetTotalMallocUsage() >> 20U;
@@ -3572,21 +3669,9 @@ bool Executor::checkMemoryUsage() {
   // just guess at how many to kill
   const auto numStates = states.size();
   auto toKill = std::max(1UL, numStates - numStates * MaxMemory / totalUsage);
+
   klee_warning("killing %lu states (over memory cap: %luMB)", toKill, totalUsage);
-
-  // randomly select states for early termination
-  std::vector<ExecutionState *> arr(states.begin(), states.end()); // FIXME: expensive
-  for (unsigned i = 0, N = arr.size(); N && i < toKill; ++i, --N) {
-    unsigned idx = theRNG.getInt32() % N;
-    // Make two pulls to try and not hit a state that
-    // covered new code.
-    if (arr[idx]->coveredNew)
-      idx = theRNG.getInt32() % N;
-
-    std::swap(arr[idx], arr[N - 1]);
-    terminateStateEarly(*arr[N - 1], "Memory limit exceeded.", StateTerminationType::OutOfMemory);
-  }
-
+  killStatesDueToCap(toKill);
   return false;
 }
 
@@ -3597,8 +3682,10 @@ void Executor::doDumpStates() {
   }
 
   klee_message("halting execution, dumping remaining states");
-  for (const auto &state : states)
-    terminateStateEarly(*state, "Execution halting.", StateTerminationType::Interrupted);
+  // Reverse order of terminating states - allows solve to continually reset to old state.
+  for (auto it = states.rbegin(); it != states.rend(); ++it) {
+    terminateStateEarly(**it, "Execution halting.", StateTerminationType::Interrupted);
+  }
   updateStates(nullptr);
 }
 
