@@ -483,9 +483,6 @@ void BatchingSearcher::printName(llvm::raw_ostream &os) {
   os << "</BatchingSearcher>\n";
 }
 
-
-///
-
 IterativeDeepeningTimeSearcher::IterativeDeepeningTimeSearcher(Searcher *baseSearcher)
   : baseSearcher{baseSearcher} {};
 
@@ -554,7 +551,8 @@ InterleavedSearcher::InterleavedSearcher(const std::vector<Searcher*> &_searcher
 ExecutionState &InterleavedSearcher::selectState() {
   Searcher *s = searchers[--index].get();
   if (index == 0) index = searchers.size();
-  return s->selectState();
+  ExecutionState& res = s->selectState();
+  return res;
 }
 
 void InterleavedSearcher::update(ExecutionState *current,
@@ -575,4 +573,93 @@ void InterleavedSearcher::printName(llvm::raw_ostream &os) {
   for (const auto &searcher : searchers)
     searcher->printName(os);
   os << "</InterleavedSearcher>\n";
+}
+
+OutputtingSearcher::OutputtingSearcher(Searcher* _searcher, std::unique_ptr<llvm::raw_ostream> _sos) :
+  searcher(_searcher), sos(std::move(_sos)) {}
+
+OutputtingSearcher::OutputtingSearcher(Searcher* _searcher, std::string fileName) : searcher(_searcher) {
+  if (fileName.empty()) {
+    klee_error("No output file specified but outputting searcher used");
+  }
+  std::string error;
+  sos = klee_open_output_file(fileName, error);
+  if (!sos) {
+    klee_error("Could not open file for outputting searcher %s : %s", fileName.c_str(), error.c_str());
+  }
+}
+
+ExecutionState &OutputtingSearcher::selectState() {
+  ExecutionState& res = searcher->selectState();
+  *sos << res.id << "\n"; // Do not flush for efficiency.
+  return res;
+}
+
+void OutputtingSearcher::update(ExecutionState *current,
+                                const std::vector<ExecutionState *> &addedStates,
+                                const std::vector<ExecutionState *> &removedStates) {
+  searcher->update(current, addedStates, removedStates);
+}
+
+bool OutputtingSearcher::empty() {
+  return searcher->empty();
+}
+
+void OutputtingSearcher::printName(llvm::raw_ostream &os) {
+  os << "<OutputtingSearcher> containing:\n";
+  searcher->printName(os);
+  os << "</OutputtingSearcher>\n";
+}
+
+InputtingSearcher::InputtingSearcher(std::unique_ptr<std::istringstream> _sis)
+  : sis(std::move(_sis)) {}
+
+InputtingSearcher::InputtingSearcher(std::string fileName) {
+  if (fileName.empty()) {
+    klee_error("No input file specified but inputting search used");
+  }
+  std::string error;
+  auto buffer = klee_open_input_file(fileName, error);
+  if (!buffer) {
+    klee_error("Could not open file for inputting search %s : %s", fileName.c_str(), error.c_str());
+  }
+  sis = std::make_unique<std::istringstream>(buffer->getBuffer().str());
+}
+
+ExecutionState &InputtingSearcher::selectState() {
+  std::uint32_t id;
+  *sis >> id;
+  if (!byId.count(id)) {
+    klee_error("Inputted state not present for selectState()");
+  }
+  return *byId[id];
+}
+
+void InputtingSearcher::update(ExecutionState *current,
+                               const std::vector<ExecutionState *> &addedStates,
+                               const std::vector<ExecutionState *> &removedStates) {
+  // Insertion.
+  for (const auto state : addedStates) {
+    if (byId.count(state->id)) {
+      klee_error("Duplicate state present.");
+    }
+    byId[state->id] = state;
+  }
+
+  // Removal.
+  for (const auto state : removedStates) {
+    auto it = byId.find(state->id);
+    if (it == byId.end() || it->second != state) {
+      klee_error("Invalid state removed.");
+    }
+    byId.erase(it);
+  }
+}
+
+bool InputtingSearcher::empty() {
+  return byId.empty();
+}
+
+void InputtingSearcher::printName(llvm::raw_ostream &os) {
+  os << "InputtingSearcher\n";
 }
