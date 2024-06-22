@@ -30,6 +30,8 @@ add_library(kleaverSolver
   ValidatingSolver.cpp
   Z3Builder.cpp
   Z3Solver.cpp
+  Z3GlobalSolver.cpp
+  Z3PoolingSolver.cpp
 )
 
 llvm_config(kleaverSolver "${USE_LLVM_SHARED}" support)
