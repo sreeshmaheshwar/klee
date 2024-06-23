@@ -3597,8 +3597,10 @@ void Executor::doDumpStates() {
   }
 
   klee_message("halting execution, dumping remaining states");
-  for (const auto &state : states)
-    terminateStateEarly(*state, "Execution halting.", StateTerminationType::Interrupted);
+  // Reverse order of terminating states - allows solve to continually reset to old state.
+  for (auto it = states.rbegin(); it != states.rend(); ++it) {
+    terminateStateEarly(**it, "Execution halting.", StateTerminationType::Interrupted);
+  }
   updateStates(nullptr);
 }
 
@@ -4042,6 +4044,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
         ce->toMemory(&args[wordIndex]);
         wordIndex += (ce->getWidth() + 63) / 64;
       } else {
+        klee_warning("State terminating due to external call with symbolic arg");
+        ++stats::symCalls;
         terminateStateOnExecError(state,
                                   "external call with symbolic argument: " +
                                       callable->getName());
