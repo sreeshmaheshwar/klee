@@ -102,6 +102,7 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     stackAllocator(state.stackAllocator),
     heapAllocator(state.heapAllocator),
     constraints(state.constraints),
+    unsimplified(state.unsimplified),
     pathOS(state.pathOS),
     symPathOS(state.symPathOS),
     coveredLines(state.coveredLines),
@@ -347,6 +348,11 @@ bool ExecutionState::merge(const ExecutionState &b) {
     m.addConstraint(constraint);
   m.addConstraint(OrExpr::create(inA, inB));
 
+  // NOTE: State merging is a auxiliary KLEE feature only invoked by
+  // the user API, so we don't fully support it with this strategy - it will
+  // never be encountered in our experiments or any real benchmarks.
+  unsimplified = constraints; 
+
   return true;
 }
 
@@ -389,8 +395,14 @@ void ExecutionState::dumpStack(llvm::raw_ostream &out) const {
 }
 
 void ExecutionState::addConstraint(ref<Expr> e) {
-  ConstraintManager c(constraints);
-  c.addConstraint(e);
+  {
+    ConstraintManager c(unsimplified, /*unsimplified=*/true);
+    c.addConstraint(ConstraintManager::simplifyExpr(constraints, e), /*simplify=*/false);
+  }
+  {
+    ConstraintManager c(constraints);
+    c.addConstraint(e);
+  }
 }
 
 void ExecutionState::addCexPreference(const ref<Expr> &cond) {
