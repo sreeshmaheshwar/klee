@@ -57,51 +57,6 @@ llvm::cl::opt<unsigned>
 
 namespace klee {
 
-class Z3SolverImpl : public SolverImpl {
-private:
-  std::unique_ptr<Z3Builder> builder;
-  time::Span timeout;
-  SolverRunStatus runStatusCode;
-  std::unique_ptr<llvm::raw_fd_ostream> dumpedQueriesFile;
-  ::Z3_params solverParameters;
-  // Parameter symbols
-  ::Z3_symbol timeoutParamStrSymbol;
-
-  bool internalRunSolver(const Query &,
-                         const std::vector<const Array *> *objects,
-                         std::vector<std::vector<unsigned char> > *values,
-                         bool &hasSolution);
-  bool validateZ3Model(::Z3_solver &theSolver, ::Z3_model &theModel);
-
-public:
-  Z3SolverImpl();
-  ~Z3SolverImpl();
-
-  std::string getConstraintLog(const Query &) override;
-  void setCoreSolverTimeout(time::Span _timeout) {
-    timeout = _timeout;
-
-    auto timeoutInMilliSeconds = static_cast<unsigned>((timeout.toMicroseconds() / 1000));
-    if (!timeoutInMilliSeconds)
-      timeoutInMilliSeconds = UINT_MAX;
-    Z3_params_set_uint(builder->ctx, solverParameters, timeoutParamStrSymbol,
-                       timeoutInMilliSeconds);
-  }
-
-  bool computeTruth(const Query &, bool &isValid);
-  bool computeValue(const Query &, ref<Expr> &result);
-  bool computeInitialValues(const Query &,
-                            const std::vector<const Array *> &objects,
-                            std::vector<std::vector<unsigned char> > &values,
-                            bool &hasSolution);
-  SolverRunStatus
-  handleSolverResponse(::Z3_solver theSolver, ::Z3_lbool satisfiable,
-                       const std::vector<const Array *> *objects,
-                       std::vector<std::vector<unsigned char> > *values,
-                       bool &hasSolution);
-  SolverRunStatus getOperationStatusCode();
-};
-
 Z3SolverImpl::Z3SolverImpl()
     : builder(new Z3Builder(
           /*autoClearConstructCache=*/false,
@@ -113,7 +68,7 @@ Z3SolverImpl::Z3SolverImpl()
   solverParameters = Z3_mk_params(builder->ctx);
   Z3_params_inc_ref(builder->ctx, solverParameters);
   timeoutParamStrSymbol = Z3_mk_string_symbol(builder->ctx, "timeout");
-  setCoreSolverTimeout(timeout);
+  setCoreSolverTimeout(timeout); // TODO: Set incremental solver timeout.
 
   if (!Z3QueryDumpFile.empty()) {
     std::string error;
@@ -133,9 +88,14 @@ Z3SolverImpl::Z3SolverImpl()
     ss.flush();
     Z3_global_param_set("verbose", underlyingString.c_str());
   }
+
+  z3Solver = Z3_mk_solver(builder->ctx);
+  Z3_solver_inc_ref(builder->ctx, z3Solver);
+  Z3_solver_set_params(builder->ctx, z3Solver, solverParameters);
 }
 
 Z3SolverImpl::~Z3SolverImpl() {
+  Z3_solver_dec_ref(builder->ctx, z3Solver);
   Z3_params_dec_ref(builder->ctx, solverParameters);
 }
 
@@ -238,68 +198,204 @@ bool Z3SolverImpl::computeInitialValues(
   return internalRunSolver(query, &objects, &values, hasSolution);
 }
 
-bool Z3SolverImpl::internalRunSolver(
-    const Query &query, const std::vector<const Array *> *objects,
-    std::vector<std::vector<unsigned char> > *values, bool &hasSolution) {
-
-  TimerStatIncrementer t(stats::queryTime);
-  // NOTE: Z3 will switch to using a slower solver internally if push/pop are
-  // used so for now it is likely that creating a new solver each time is the
-  // right way to go until Z3 changes its behaviour.
-  //
-  // TODO: Investigate using a custom tactic as described in
-  // https://github.com/klee/klee/issues/653
-  Z3_solver theSolver = Z3_mk_solver(builder->ctx);
-  Z3_solver_inc_ref(builder->ctx, theSolver);
-  Z3_solver_set_params(builder->ctx, theSolver, solverParameters);
-
+bool Z3SolverImpl::popAndAssertRemaining(int framesToPop,
+                                         const Query &query,
+                                         const std::vector<const Array *> *objects,
+                                         std::vector<std::vector<unsigned char> > *values,
+                                         bool &hasSolution) {
   runStatusCode = SOLVER_RUN_STATUS_FAILURE;
+  TimerStatIncrementer t(stats::queryTime);
 
-  ConstantArrayFinder constant_arrays_in_query;
-  for (auto const &constraint : query.constraints) {
-    Z3_solver_assert(builder->ctx, theSolver, builder->construct(constraint));
-    constant_arrays_in_query.visit(constraint);
+  Z3_solver_pop(builder->ctx, z3Solver, (int) assertionStack.size() - framesToPop);
+  assertionStack.resize(framesToPop);
+
+  ExprHashSet inStack;
+  for (const auto &e : assertionStack) {
+    inStack.insert(e);
   }
-  ++stats::solverQueries;
-  if (objects)
-    ++stats::queryCounterexamples;
-
-  Z3ASTHandle z3QueryExpr =
-      Z3ASTHandle(builder->construct(query.expr), builder->ctx);
-  constant_arrays_in_query.visit(query.expr);
-
-  for (auto const &constant_array : constant_arrays_in_query.results) {
-    assert(builder->constant_array_assertions.count(constant_array) == 1 &&
-           "Constant array found in query, but not handled by Z3Builder");
-    for (auto const &arrayIndexValueExpr :
-         builder->constant_array_assertions[constant_array]) {
-      Z3_solver_assert(builder->ctx, theSolver, arrayIndexValueExpr);
-    }
-  }
-
+  
   // KLEE Queries are validity queries i.e.
   // ∀ X Constraints(X) → query(X)
   // but Z3 works in terms of satisfiability so instead we ask the
   // negation of the equivalent i.e.
   // ∃ X Constraints(X) ∧ ¬ query(X)
-  Z3_solver_assert(
-      builder->ctx, theSolver,
-      Z3ASTHandle(Z3_mk_not(builder->ctx, z3QueryExpr), builder->ctx));
+  auto negated_exp = Expr::createIsZero(query.expr);
+  bool expr_done = false;
+  auto query_it = query.constraints.begin();
+  // We can't modify the query constraints (by pushing the negated
+  // expression to it) and don't want to create a copy of them. So
+  // we take the approach of manually advancing custom iterators.
+  auto all_written = [&]() -> bool {
+    return query_it == query.constraints.end() && expr_done;
+  };
+  auto get_expr_to_write = [&]() {
+    if (query_it == query.constraints.end()) {
+      return negated_exp;
+    }
+    return *query_it;
+  };
+  auto advance_expr_to_write = [&]() {
+    if (query_it != query.constraints.end()) {
+      ++query_it;
+    } else {
+      expr_done = true;
+    }
+  };
+
+  for (; !all_written(); advance_expr_to_write()) {
+    auto e = get_expr_to_write();
+    if (inStack.insert(e).second) {
+      Z3_solver_push(builder->ctx, z3Solver);
+      assertionStack.push_back(e);
+      Z3_solver_assert(builder->ctx, z3Solver, builder->construct(e));
+      ConstantArrayFinder constant_arrays_in_query;
+      constant_arrays_in_query.visit(e);
+      // Add constant array assertions, NB: at the same level, to benefit from
+      // incrementality over them. Downside is that we may assert the same
+      // constraint multiple times.
+      for (auto const &constant_array : constant_arrays_in_query.results) {
+        assert(builder->constant_array_assertions.count(constant_array) == 1 &&
+                "Constant array found in query, but not handled by Z3Builder");
+        for (auto const &arrayIndexValueExpr :
+              builder->constant_array_assertions[constant_array]) {
+          Z3_solver_assert(builder->ctx, z3Solver, arrayIndexValueExpr);
+        }
+      }
+    }
+  }
+
+
+  ++stats::solverQueries;
+  if (objects)
+    ++stats::queryCounterexamples;
 
   if (dumpedQueriesFile) {
     *dumpedQueriesFile << "; start Z3 query\n";
-    *dumpedQueriesFile << Z3_solver_to_string(builder->ctx, theSolver);
+    *dumpedQueriesFile << Z3_solver_to_string(builder->ctx, z3Solver);
     *dumpedQueriesFile << "(check-sat)\n";
     *dumpedQueriesFile << "(reset)\n";
     *dumpedQueriesFile << "; end Z3 query\n\n";
     dumpedQueriesFile->flush();
   }
 
-  ::Z3_lbool satisfiable = Z3_solver_check(builder->ctx, theSolver);
-  runStatusCode = handleSolverResponse(theSolver, satisfiable, objects, values,
+  ::Z3_lbool satisfiable = Z3_solver_check(builder->ctx, z3Solver);
+  runStatusCode = handleSolverResponse(z3Solver, satisfiable, objects, values,
                                        hasSolution);
 
-  Z3_solver_dec_ref(builder->ctx, theSolver);
+  // Clear the builder's cache to prevent memory usage exploding.
+  // By using ``autoClearConstructCache=false`` and clearning now
+  // we allow Z3_ast expressions to be shared from an entire
+  // ``Query`` rather than only sharing within a single call to
+  // ``builder->construct()``.
+  builder->clearConstructCache();
+
+  if (runStatusCode == SolverImpl::SOLVER_RUN_STATUS_SUCCESS_SOLVABLE ||
+      runStatusCode == SolverImpl::SOLVER_RUN_STATUS_SUCCESS_UNSOLVABLE) {
+    if (hasSolution) {
+      ++stats::queriesInvalid;
+    } else {
+      ++stats::queriesValid;
+    }
+    return true; // success
+  }
+  if (runStatusCode == SolverImpl::SOLVER_RUN_STATUS_INTERRUPTED) {
+    raise(SIGINT);
+  }
+  return false; // failed
+}
+
+bool Z3SolverImpl::internalRunSolver(
+    const Query &query, const std::vector<const Array *> *objects,
+    std::vector<std::vector<unsigned char> > *values, bool &hasSolution) {
+  runStatusCode = SOLVER_RUN_STATUS_FAILURE;
+  TimerStatIncrementer t(stats::queryTime);
+
+  auto stack_it = assertionStack.begin();
+  auto query_it = query.constraints.begin();
+
+  // KLEE Queries are validity queries i.e.
+  // ∀ X Constraints(X) → query(X)
+  // but Z3 works in terms of satisfiability so instead we ask the
+  // negation of the equivalent i.e.
+  // ∃ X Constraints(X) ∧ ¬ query(X)
+  auto negated_exp = Expr::createIsZero(query.expr);
+  bool expr_done = false;
+
+  // We can't modify the query constraints (by pushing the negated
+  // expression to it) and don't want to create a copy of them. So
+  // we take the approach of manually advancing custom iterators.
+  auto all_written = [&]() -> bool {
+    return query_it == query.constraints.end() && expr_done;
+  };
+  auto get_expr_to_write = [&]() {
+    if (query_it == query.constraints.end()) {
+      return negated_exp;
+    }
+    return *query_it;
+  };
+  auto advance_expr_to_write = [&]() {
+    if (query_it != query.constraints.end()) {
+      ++query_it;
+    } else {
+      expr_done = true;
+    }
+  };
+
+  // LCP between the assertion stack and the query constraints.
+  while (stack_it != assertionStack.end() && !all_written() && !(*stack_it)->compare(*get_expr_to_write())) {
+    ++stack_it;
+    advance_expr_to_write();
+    // ++stats::commonConstraints; // TODO: Add back.
+  }
+
+  // LCP is computed; start the timer. // TODO: Add back.
+  // TimerStatIncrementer postLCPIncrementer(stats::postLCPTime);
+
+  // Pop off extra constraints from stack.
+  Z3_solver_pop(builder->ctx, z3Solver, std::distance(stack_it, assertionStack.end()));
+  assertionStack.erase(stack_it, assertionStack.end());
+
+  // Add the remaining query constraints.
+  while (!all_written()) {
+    Z3_solver_push(builder->ctx, z3Solver);
+    auto e = get_expr_to_write();
+    assertionStack.push_back(e);
+    Z3_solver_assert(builder->ctx, z3Solver, builder->construct(e));
+
+    ConstantArrayFinder constant_arrays_in_query;
+    constant_arrays_in_query.visit(e);
+    // Add constant array assertions, NB: at the same level, to benefit from
+    // incrementality over them. Downside is that we may assert the same
+    // constraint multiple times.
+    for (auto const &constant_array : constant_arrays_in_query.results) {
+      assert(builder->constant_array_assertions.count(constant_array) == 1 &&
+              "Constant array found in query, but not handled by Z3Builder");
+      for (auto const &arrayIndexValueExpr :
+            builder->constant_array_assertions[constant_array]) {
+        Z3_solver_assert(builder->ctx, z3Solver, arrayIndexValueExpr);
+      }
+    }
+
+    advance_expr_to_write();
+  }
+
+  ++stats::solverQueries;
+  if (objects)
+    ++stats::queryCounterexamples;
+
+  if (dumpedQueriesFile) {
+    *dumpedQueriesFile << "; start Z3 query\n";
+    *dumpedQueriesFile << Z3_solver_to_string(builder->ctx, z3Solver);
+    *dumpedQueriesFile << "(check-sat)\n";
+    *dumpedQueriesFile << "(reset)\n";
+    *dumpedQueriesFile << "; end Z3 query\n\n";
+    dumpedQueriesFile->flush();
+  }
+
+  ::Z3_lbool satisfiable = Z3_solver_check(builder->ctx, z3Solver);
+  runStatusCode = handleSolverResponse(z3Solver, satisfiable, objects, values,
+                                       hasSolution);
+
   // Clear the builder's cache to prevent memory usage exploding.
   // By using ``autoClearConstructCache=false`` and clearning now
   // we allow Z3_ast expressions to be shared from an entire
